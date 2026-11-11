@@ -6,7 +6,13 @@ from aiogram import Bot
 from aiogram.types import User
 
 from bot.captcha import FAIL_TEXT, check_body
-from bot.logic import AD_EVERY_MESSAGES, AD_KEEP_MESSAGES, ad_message_text, human_seconds
+from bot.logic import (
+    AD_EVERY_MESSAGES,
+    AD_KEEP_MESSAGES,
+    ad_message_text,
+    cooldown_label,
+    human_seconds,
+)
 from bot.ops import mention, send_html
 from bot.panel import SPAM_REASON, ad_keyboard, sample_check_keyboard
 
@@ -38,6 +44,7 @@ async def send_member_preview(
     intro = (
         f"<b>Превью · {escape(chat_title)}</b>\n"
         "Так сообщение выглядит в чате. Кнопка «Я не робот» здесь ничего не делает. "
+        "Если в настройках чата «Видит: только новичок», в чате его видит только сам участник. "
         "В личку это не отправляется."
     )
     if sample_chat:
@@ -72,6 +79,18 @@ async def send_member_preview(
         )
     else:
         await send_html(bot, viewer.id, "Отдельный пост в чат сейчас выключен.")
+
+    if raw and ads.get("enabled") and ads.get("personal"):
+        await send_html(
+            bot,
+            viewer.id,
+            "<i>Лично автору сообщения, "
+            f"{cooldown_label(int(ads.get('personal_cooldown') or 0))}. "
+            "В чате это видит только он.</i>\n\n"
+            + ad_message_text(raw),
+            ad_keyboard(ads),
+            preview=True,
+        )
 
     fail = FAIL_TEXT.get(fail_mode, FAIL_TEXT["kick"])
     await send_html(bot, viewer.id, "<i>Если кнопку не нажать</i>\n\n" + escape(fail))

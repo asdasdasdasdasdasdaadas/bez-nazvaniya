@@ -18,6 +18,7 @@ from bot.ops import (
     PREVIEW_OFF,
     clear_restrictions,
     delete_message,
+    delete_prompt,
     edit_html,
     fade,
     is_chat_admin,
@@ -213,6 +214,10 @@ async def toggle(callback: CallbackQuery, state: FSMContext, app: App, bot) -> N
     await app.db.update_chat(chat_id, **{field: new})
     if key == "mod":
         await callback.answer("Модерация включена" if new else "Модерация выключена")
+    elif key == "prv":
+        await callback.answer(
+            "Проверку видит только новичок" if new else "Проверку видит весь чат"
+        )
     else:
         await callback.answer("Теперь: вкл" if new else "Теперь: выкл")
     if new == 0 and key in {"cap", "mod"}:
@@ -233,8 +238,7 @@ async def toggle(callback: CallbackQuery, state: FSMContext, app: App, bot) -> N
 async def _release_pending(bot, app: App, chat_id: int) -> None:
     rows = await app.db.cancel_chat_pending(chat_id, int(time.time()))
     for row in rows:
-        if row.get("prompt_message_id"):
-            await delete_message(bot, chat_id, row["prompt_message_id"])
+        await delete_prompt(bot, chat_id, row["user_id"], row)
         try:
             await clear_restrictions(bot, chat_id, row["user_id"])
         except TelegramBadRequest:

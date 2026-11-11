@@ -7,7 +7,9 @@ from html import escape
 
 from aiogram import Bot
 from aiogram.enums import ChatMemberStatus, ParseMode
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.methods import SendMessage
+from aiogram.methods.base import TelegramMethod
 from aiogram.types import (
     ChatPermissions,
     InlineKeyboardMarkup,
@@ -98,6 +100,67 @@ async def send_html(
         link_preview_options=PREVIEW_ON if preview else PREVIEW_OFF,
         disable_notification=disable_notification,
     )
+
+
+class DeleteEphemeralMessage(TelegramMethod[bool]):
+    """Bot API 10.2. В aiogram этого метода пока нет."""
+
+    __returning__ = bool
+    __api_method__ = "deleteEphemeralMessage"
+
+    chat_id: int
+    receiver_user_id: int
+    ephemeral_message_id: int
+
+
+async def send_ephemeral(
+    bot: Bot,
+    chat_id: int,
+    user_id: int,
+    text: str,
+    markup: InlineKeyboardMarkup | None = None,
+    *,
+    preview: bool = False,
+) -> int | None:
+    """Сообщение в группе, которое видит только user_id. Возвращает ephemeral_message_id.
+
+    Бот должен быть админом чата. Telegram не гарантирует доставку,
+    а клиент может спрятать сообщение после перезапуска.
+    """
+    method = SendMessage(
+        chat_id=chat_id,
+        text=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=markup,
+        link_preview_options=PREVIEW_ON if preview else PREVIEW_OFF,
+        ephemeral_message_parameters={"receiver_user_id": user_id},
+    )
+    sent = await bot(method)
+    value = getattr(sent, "ephemeral_message_id", None)
+    return int(value) if value else None
+
+
+async def delete_ephemeral(bot: Bot, chat_id: int, user_id: int, ephemeral_id: int | None) -> None:
+    if not ephemeral_id:
+        return
+    try:
+        await bot(
+            DeleteEphemeralMessage(
+                chat_id=chat_id,
+                receiver_user_id=user_id,
+                ephemeral_message_id=ephemeral_id,
+            )
+        )
+    except TelegramAPIError:
+        return
+
+
+async def delete_prompt(bot: Bot, chat_id: int, user_id: int, pending: dict | None) -> None:
+    """Убирает сообщение проверки: обычное или эфемерное."""
+    if not pending:
+        return
+    await delete_message(bot, chat_id, pending.get("prompt_message_id"))
+    await delete_ephemeral(bot, chat_id, user_id, pending.get("ephemeral_id"))
 
 
 async def edit_html(message: Message, text: str, markup: InlineKeyboardMarkup | None) -> None:

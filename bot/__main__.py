@@ -132,6 +132,7 @@ async def run(settings: Settings) -> None:
                     "callback_query",
                     "my_chat_member",
                     "chat_member",
+                    "message_reaction",
                 ],
             )
         finally:

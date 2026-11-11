@@ -19,6 +19,7 @@ from bot.ops import (
     can_restrict_members,
     clear_restrictions,
     delete_message,
+    delete_prompt,
     ensure_chat,
     explain_telegram_error,
     fade,
@@ -220,15 +221,13 @@ async def _punish(message: Message, bot: Bot, app: App, args: str, action: str) 
             seconds = 0
             await kick_member(bot, message.chat.id, target.id)
             pending = await app.db.drop_pending(message.chat.id, target.id)
-            if pending and pending.get("prompt_message_id"):
-                await delete_message(bot, message.chat.id, pending["prompt_message_id"])
+            await delete_prompt(bot, message.chat.id, target.id, pending)
         elif action == "unmute":
             seconds = 0
             await clear_restrictions(bot, message.chat.id, target.id)
             pending = await app.db.drop_pending(message.chat.id, target.id)
             await app.db.mark_verified(message.chat.id, target.id)
-            if pending and pending.get("prompt_message_id"):
-                await delete_message(bot, message.chat.id, pending["prompt_message_id"])
+            await delete_prompt(bot, message.chat.id, target.id, pending)
         elif action == "unban":
             seconds = 0
             await unban_member(bot, message.chat.id, target.id)
@@ -448,8 +447,7 @@ async def undo(callback: CallbackQuery, app: App, bot: Bot) -> None:
             await clear_restrictions(bot, chat_id, user_id)
             pending = await app.db.drop_pending(chat_id, user_id)
             await app.db.mark_verified(chat_id, user_id)
-            if pending and pending.get("prompt_message_id"):
-                await delete_message(bot, chat_id, pending["prompt_message_id"])
+            await delete_prompt(bot, chat_id, user_id, pending)
             action = "unmute"
         else:
             await unban_member(bot, chat_id, user_id)

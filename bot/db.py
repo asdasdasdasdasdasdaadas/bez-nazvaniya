@@ -28,6 +28,7 @@ CHAT_FIELDS = {
     "warn_limit",
     "warn_action",
     "ad_cursor",
+    "captcha_private",
 }
 
 AD_FIELDS = {
@@ -38,6 +39,8 @@ AD_FIELDS = {
     "button_text",
     "button_url",
     "every_n",
+    "personal",
+    "personal_cooldown",
 }
 
 SCHEMA = """
@@ -67,6 +70,7 @@ CREATE TABLE IF NOT EXISTS chats (
     warn_action TEXT NOT NULL DEFAULT 'mute',
     ad_cursor INTEGER NOT NULL DEFAULT 0,
     msg_count INTEGER NOT NULL DEFAULT 0,
+    captcha_private INTEGER NOT NULL DEFAULT 1,
     created_at INTEGER NOT NULL
 );
 
@@ -81,6 +85,7 @@ CREATE TABLE IF NOT EXISTS pending (
     user_id INTEGER NOT NULL,
     prompt_message_id INTEGER,
     dm_message_id INTEGER,
+    ephemeral_id INTEGER,
     deadline INTEGER NOT NULL,
     PRIMARY KEY (chat_id, user_id)
 );
@@ -121,7 +126,9 @@ CREATE TABLE IF NOT EXISTS ads (
     text TEXT NOT NULL DEFAULT '',
     button_text TEXT NOT NULL DEFAULT '',
     button_url TEXT NOT NULL DEFAULT '',
-    every_n INTEGER NOT NULL DEFAULT 1
+    every_n INTEGER NOT NULL DEFAULT 1,
+    personal INTEGER NOT NULL DEFAULT 0,
+    personal_cooldown INTEGER NOT NULL DEFAULT 21600
 );
 
 CREATE TABLE IF NOT EXISTS posted_ads (
@@ -130,7 +137,23 @@ CREATE TABLE IF NOT EXISTS posted_ads (
     at_count INTEGER NOT NULL,
     PRIMARY KEY (chat_id, message_id)
 );
+
+CREATE TABLE IF NOT EXISTS ad_seen (
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    shown_at INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, user_id)
+);
 """
+
+MIGRATIONS = (
+    ("chats", "moderation_enabled", "INTEGER NOT NULL DEFAULT 1"),
+    ("chats", "msg_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("chats", "captcha_private", "INTEGER NOT NULL DEFAULT 1"),
+    ("pending", "ephemeral_id", "INTEGER"),
+    ("ads", "personal", "INTEGER NOT NULL DEFAULT 0"),
+    ("ads", "personal_cooldown", "INTEGER NOT NULL DEFAULT 21600"),
+)
 
 
 def _dict(row) -> dict | None:
@@ -160,16 +183,11 @@ class Database:
 
     async def _migrate(self) -> None:
         assert self.conn is not None
-        cursor = await self.conn.execute("PRAGMA table_info(chats)")
-        names = {row[1] for row in await cursor.fetchall()}
-        if names and "moderation_enabled" not in names:
-            await self.conn.execute(
-                "ALTER TABLE chats ADD COLUMN moderation_enabled INTEGER NOT NULL DEFAULT 1"
-            )
-        if names and "msg_count" not in names:
-            await self.conn.execute(
-                "ALTER TABLE chats ADD COLUMN msg_count INTEGER NOT NULL DEFAULT 0"
-            )
+        for table, column, kind in MIGRATIONS:
+            cursor = await self.conn.execute(f"PRAGMA table_info({table})")
+            names = {row[1] for row in await cursor.fetchall()}
+            if names and column not in names:
+                await self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
 
     async def close(self) -> None:
         if self.conn is not None:
@@ -379,6 +397,7 @@ class Database:
         *,
         prompt_id: int | None = None,
         dm_id: int | None = None,
+        ephemeral_id: int | None = None,
     ) -> None:
         assert self.conn is not None
         sets: list[str] = []
@@ -389,6 +408,9 @@ class Database:
         if dm_id is not None:
             sets.append("dm_message_id=?")
             values.append(dm_id)
+        if ephemeral_id is not None:
+            sets.append("ephemeral_id=?")
+            values.append(ephemeral_id)
         if not sets:
             return
         values.extend([chat_id, user_id])
@@ -585,3 +607,24 @@ class Database:
                 (chat_id, message_id, at_count),
             )
             await self.conn.commit()
+
+    async def claim_personal_ad(self, chat_id: int, user_id: int, *, now: int, cooldown: int) -> bool:
+        """True, если этому человеку в этом чате пора показать рекламу. Сразу отмечает показ."""
+        assert self.conn is not None
+        async with self._lock:
+            cursor = await self.conn.execute(
+                "SELECT shown_at FROM ad_seen WHERE chat_id=? AND user_id=?",
+                (chat_id, user_id),
+            )
+            row = await cursor.fetchone()
+            if row is not None and now - int(row["shown_at"]) < cooldown:
+                return False
+            await self.conn.execute(
+                """
+                INSERT INTO ad_seen (chat_id, user_id, shown_at) VALUES (?, ?, ?)
+                ON CONFLICT(chat_id, user_id) DO UPDATE SET shown_at=excluded.shown_at
+                """,
+                (chat_id, user_id, now),
+            )
+            await self.conn.commit()
+            return True

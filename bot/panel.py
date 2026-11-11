@@ -4,7 +4,14 @@ from html import escape
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from bot.logic import DEFAULT_WELCOME, ad_message_text, build_welcome_text, human_seconds, short_title
+from bot.logic import (
+    DEFAULT_WELCOME,
+    ad_message_text,
+    build_welcome_text,
+    cooldown_label,
+    human_seconds,
+    short_title,
+)
 
 ADD_RIGHTS = "delete_messages+restrict_members"
 
@@ -72,6 +79,8 @@ def ads_line(ads: dict) -> str:
         parts.append("в проверке")
     if ads["separate"]:
         parts.append("постом каждые 150 сообщений")
+    if ads.get("personal"):
+        parts.append("лично автору сообщения, " + cooldown_label(int(ads.get("personal_cooldown") or 0)))
     if not parts:
         return "Реклама создателя бота: включена, места показа выключены."
     return "Реклама создателя бота: " + " и ".join(parts) + "."
@@ -119,6 +128,7 @@ def chat_text(chat: dict, ads: dict, missing: list[str]) -> str:
     welcome = "свой текст" if (chat["welcome_text"] or "").strip() else "нет"
     service = "удаляются" if chat["delete_service"] else "остаются"
     check = "включена" if chat["captcha_enabled"] else "выключена"
+    seen_by = "только новичок" if int(chat.get("captcha_private", 1)) else "весь чат"
     if int(chat.get("moderation_enabled", 1)):
         paused = ""
     else:
@@ -127,6 +137,7 @@ def chat_text(chat: dict, ads: dict, missing: list[str]) -> str:
         f"<b>{title}</b>\n\n"
         f"{paused}"
         f"Проверка «Я не робот»: {check}\n"
+        f"Проверку видит: {seen_by}\n"
         f"Время на кнопку: {human_seconds(int(chat['captcha_timeout']))}\n"
         f"Если не нажал: {FAIL_LABEL.get(chat['captcha_fail'], chat['captcha_fail'])}\n"
         f"Приветствие: {welcome}\n"
@@ -142,6 +153,10 @@ def chat_keyboard(chat: dict, username: str, missing: list[str]) -> InlineKeyboa
     rows = [
         [btn("Включить модерацию" if paused else "Отключить модерацию", f"t:{chat_id}:mod")],
         [btn(f"Проверка: {on(chat['captcha_enabled'])}", f"t:{chat_id}:cap")],
+        [btn(
+            "Видит: только новичок" if int(chat.get("captcha_private", 1)) else "Видит: весь чат",
+            f"t:{chat_id}:prv",
+        )],
         [btn(f"Если не нажал: {FAIL_LABEL.get(chat['captcha_fail'], 'кик')}", f"y:{chat_id}:fail")],
         [btn(f"Время: {human_seconds(int(chat['captcha_timeout']))}", f"y:{chat_id}:cto")],
         [btn("Текст приветствия", f"w:{chat_id}")],
@@ -243,10 +258,15 @@ def owner_text(ads: dict) -> str:
         "В проверке — блок в сообщении «Я не робот». Оно пропадает, "
         "когда человек подтвердил вход или не успел.\n"
         "Пост в чат — каждые 150 сообщений. Предыдущий такой пост "
-        "удаляется через 350 сообщений.\n\n"
+        "удаляется через 350 сообщений.\n"
+        "Лично автору — человек написал в чат или поставил реакцию, и бот показывает "
+        "рекламу в этом же чате только ему. Остальные её не видят. "
+        "Админам и участникам с тегом не показывается.\n\n"
         f"Общий выключатель: {on(ads['enabled'])}\n"
         f"В проверке: {on(ads['in_welcome'])}\n"
         f"Пост в чат: {on(ads['separate'])}\n"
+        f"Лично автору: {on(ads.get('personal', 0))}, "
+        f"{cooldown_label(int(ads.get('personal_cooldown') or 0))}\n"
         f"Текст: {preview}\n"
         f"Кнопка: {escape(button)}"
     )
@@ -257,6 +277,11 @@ def owner_keyboard(ads: dict) -> InlineKeyboardMarkup:
         [btn(f"Реклама: {on(ads['enabled'])}", "ot:en")],
         [btn(f"В проверке: {on(ads['in_welcome'])}", "ot:iw")],
         [btn(f"Пост в чат: {on(ads['separate'])}", "ot:sp")],
+        [btn(f"Лично автору: {on(ads.get('personal', 0))}", "ot:pm")],
+        [btn(
+            "Как часто: " + cooldown_label(int(ads.get("personal_cooldown") or 0)),
+            "oy:pc",
+        )],
         [btn("Текст рекламы", "ow")],
         [btn("Кнопка", "ob")],
         [btn("Превью писем", "op")],

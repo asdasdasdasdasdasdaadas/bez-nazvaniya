@@ -53,6 +53,7 @@ _SPECIAL = {
 TOGGLES = {
     "mod": "moderation_enabled",
     "cap": "captcha_enabled",
+    "prv": "captcha_private",
     "svc": "delete_service",
     "lnk": "spam_links",
     "fwd": "spam_forwards",
@@ -73,14 +74,19 @@ CYCLES: dict[str, tuple[str, list]] = {
     "wac": ("warn_action", ["mute", "ban"]),
 }
 
+# 0 — после каждого сообщения человека.
+PERSONAL_COOLDOWNS = [0, 3600, 21600, 86400]
+
 OWNER_TOGGLES = {
     "en": "enabled",
     "iw": "in_welcome",
     "sp": "separate",
+    "pm": "personal",
 }
 
 OWNER_CYCLES = {
     "n": ("every_n", [1, 2, 3, 5, 10, 20]),
+    "pc": ("personal_cooldown", PERSONAL_COOLDOWNS),
 }
 
 AD_EVERY_MESSAGES = 150
@@ -101,6 +107,13 @@ def plural(value: int, one: str, few: str, many: str) -> str:
     if 2 <= tail <= 4:
         return few
     return many
+
+
+def cooldown_label(seconds: int) -> str:
+    if seconds <= 0:
+        return "после каждого сообщения"
+    named = {3600: "раз в час", 86400: "раз в сутки"}
+    return named.get(seconds, f"раз в {human_seconds(seconds)}")
 
 
 def human_seconds(seconds: int) -> str:

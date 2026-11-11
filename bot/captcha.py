@@ -21,12 +21,14 @@ from bot.ops import (
     ban_member,
     clear_restrictions,
     delete_message,
+    delete_prompt,
     ensure_chat,
     fade,
     is_chat_admin,
     kick_member,
     lock_member,
     mention,
+    send_ephemeral,
     send_html,
     warn_rights_once,
 )
@@ -52,6 +54,10 @@ def _ads_inside(ads: dict) -> bool:
 
 def _ads_separate(ads: dict) -> bool:
     return bool(ads["enabled"] and ads["separate"] and (ads["text"] or "").strip())
+
+
+def _ads_personal(ads: dict) -> bool:
+    return bool(ads["enabled"] and ads.get("personal") and (ads["text"] or "").strip())
 
 
 def check_body(chat: dict, user_name: str, username: str, ads: dict) -> str:
@@ -98,14 +104,22 @@ async def begin_captcha(bot: Bot, app: App, chat, user: User) -> None:
     username = f"@{user.username}" if user.username else "без username"
     name = user.full_name or user.first_name or "участник"
     body = check_body(row, name, username, ads)
+    lead = f"{mention(user.id, name)}, подтвердите, что вы человек."
+    text = f"{lead}\n\n{body}" if body else lead
+    markup = check_keyboard(chat.id, user.id, ads, _ads_inside(ads))
+
+    if int(row.get("captcha_private", 1)):
+        try:
+            ephemeral_id = await send_ephemeral(bot, chat.id, user.id, text, markup)
+        except TelegramAPIError as exc:
+            logger.warning("Эфемерная проверка не ушла в %s, показываю всем: %s", chat.id, exc)
+            ephemeral_id = None
+        if ephemeral_id:
+            await app.db.set_captcha_messages(chat.id, user.id, ephemeral_id=ephemeral_id)
+            return
+
     try:
-        lead = f"{mention(user.id, name)}, подтвердите, что вы человек."
-        prompt = await send_html(
-            bot,
-            chat.id,
-            f"{lead}\n\n{body}" if body else lead,
-            check_keyboard(chat.id, user.id, ads, _ads_inside(ads)),
-        )
+        prompt = await send_html(bot, chat.id, text, markup)
     except TelegramAPIError:
         logger.warning("Не удалось показать проверку в %s", chat.id)
         await app.db.drop_pending(chat.id, user.id)
@@ -127,8 +141,7 @@ async def pass_captcha(bot: Bot, app: App, chat_id: int, user_id: int) -> str:
     if member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}:
         pending = await app.db.drop_pending(chat_id, user_id)
         await app.db.mark_verified(chat_id, user_id)
-        if pending and pending.get("prompt_message_id"):
-            await delete_message(bot, chat_id, pending["prompt_message_id"])
+        await delete_prompt(bot, chat_id, user_id, pending)
         return "ok"
 
     now = int(time.time())
@@ -150,8 +163,7 @@ async def pass_captcha(bot: Bot, app: App, chat_id: int, user_id: int) -> str:
             logger.warning("Не снял ограничение %s/%s: %s", chat_id, user_id, exc)
             return "rights"
 
-    if pending and pending.get("prompt_message_id"):
-        await delete_message(bot, chat_id, pending["prompt_message_id"])
+    await delete_prompt(bot, chat_id, user_id, pending)
     if just_passed:
         await app.db.add_log(
             chat_id,
@@ -168,8 +180,7 @@ async def fail_captcha(bot: Bot, app: App, chat_id: int, user_id: int) -> None:
         pending = await app.db.drop_pending(chat_id, user_id)
         if pending is None:
             return
-        if pending.get("prompt_message_id"):
-            await delete_message(bot, chat_id, pending["prompt_message_id"])
+        await delete_prompt(bot, chat_id, user_id, pending)
         try:
             await clear_restrictions(bot, chat_id, user_id)
         except TelegramBadRequest:
@@ -190,8 +201,7 @@ async def fail_captcha(bot: Bot, app: App, chat_id: int, user_id: int) -> None:
     except TelegramBadRequest as exc:
         logger.warning("Не наказал за просроченную проверку %s/%s: %s", chat_id, user_id, exc)
 
-    if pending.get("prompt_message_id"):
-        await delete_message(bot, chat_id, pending["prompt_message_id"])
+    await delete_prompt(bot, chat_id, user_id, pending)
     await fade(
         bot,
         chat_id,
@@ -204,8 +214,7 @@ async def fail_captcha(bot: Bot, app: App, chat_id: int, user_id: int) -> None:
 async def cancel_because_left(bot: Bot, app: App, chat_id: int, user_id: int) -> None:
     await app.db.forget_verified(chat_id, user_id)
     pending = await app.db.drop_pending(chat_id, user_id)
-    if pending and pending.get("prompt_message_id"):
-        await delete_message(bot, chat_id, pending["prompt_message_id"])
+    await delete_prompt(bot, chat_id, user_id, pending)
 
 
 async def send_public_ad(bot: Bot, chat_id: int, ads: dict) -> int | None:
@@ -237,14 +246,83 @@ async def note_chat_message(bot: Bot, app: App, message: Message) -> None:
     count, stale = bumped
     for message_id in stale:
         await delete_message(bot, message.chat.id, message_id)
+    ads = await app.db.get_ads()
+    await send_personal_ad(bot, app, message, ads)
     if count % AD_EVERY_MESSAGES != 0:
         return
-    ads = await app.db.get_ads()
     if not _ads_separate(ads):
         return
     posted = await send_public_ad(bot, message.chat.id, ads)
     if posted is not None:
         await app.db.remember_posted_ad(message.chat.id, posted, count)
+
+
+async def send_personal_ad(bot: Bot, app: App, message: Message, ads: dict) -> None:
+    """Реклама автору сообщения. Видит только он, остальные в чате — нет."""
+    if (message.text or "").startswith("/"):
+        return
+    await offer_personal_ad(
+        bot,
+        app,
+        message.chat.id,
+        message.from_user.id,
+        ads,
+        sender_tag=getattr(message, "sender_tag", None),
+    )
+
+
+async def ad_exempt(bot: Bot, app: App, chat_id: int, user_id: int) -> bool:
+    """Админам и участникам с тегом личную рекламу не показываем."""
+    admins = await app.admins.ids(bot, chat_id)
+    if admins is None or user_id in admins:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+    except TelegramAPIError:
+        return True
+    if member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}:
+        return True
+    # Bot API 9.5: тег обычного участника. В aiogram поля пока нет, приходит как extra.
+    return bool(getattr(member, "tag", None))
+
+
+async def offer_personal_ad(
+    bot: Bot,
+    app: App,
+    chat_id: int,
+    user_id: int,
+    ads: dict,
+    *,
+    sender_tag: str | None = None,
+) -> bool:
+    """Показывает рекламу человеку в чате эфемерно, если пора. True — если отправили."""
+    if not _ads_personal(ads):
+        return False
+    if sender_tag:  # у автора сообщения есть тег или звание
+        return False
+    # Сначала отметка паузы: так лишний раз не спрашиваем Telegram про участника.
+    if not await app.db.claim_personal_ad(
+        chat_id,
+        user_id,
+        now=int(time.time()),
+        cooldown=int(ads.get("personal_cooldown") or 0),
+    ):
+        return False
+    if await ad_exempt(bot, app, chat_id, user_id):
+        return False
+    try:
+        await send_ephemeral(
+            bot,
+            chat_id,
+            user_id,
+            ad_message_text(ads["text"]),
+            ad_keyboard(ads),
+            preview=True,
+        )
+    except TelegramAPIError as exc:
+        logger.info("Личная реклама не ушла в %s: %s", chat_id, exc)
+        return False
+    return True
 
 
 async def watch(bot: Bot, app: App) -> None:
