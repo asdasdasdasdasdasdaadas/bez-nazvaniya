@@ -8,10 +8,10 @@ from bot.logic import (
     DEFAULT_WELCOME,
     ad_message_text,
     build_welcome_text,
-    cooldown_label,
     human_seconds,
     short_title,
 )
+from bot.logic import ADS_PER_DAY, AD_MIN_GAP
 
 ADD_RIGHTS = "delete_messages+restrict_members"
 
@@ -77,13 +77,14 @@ def ads_line(ads: dict) -> str:
     parts = []
     if ads["in_welcome"]:
         parts.append("в проверке")
-    if ads["separate"]:
-        parts.append("постом каждые 150 сообщений")
     if ads.get("personal"):
-        parts.append("лично автору сообщения, " + cooldown_label(int(ads.get("personal_cooldown") or 0)))
+        parts.append(f"каждому участнику до {ADS_PER_DAY} раз в день")
     if not parts:
         return "Реклама создателя бота: включена, места показа выключены."
-    return "Реклама создателя бота: " + " и ".join(parts) + "."
+    return (
+        "Реклама создателя бота: " + " и ".join(parts) + ". "
+        "Видит только сам человек, админам и участникам с тегом не показывается."
+    )
 
 
 def rights_line(missing: list[str]) -> str:
@@ -254,19 +255,18 @@ def owner_text(ads: dict) -> str:
         button = "нет"
     return (
         "<b>Реклама создателя бота</b>\n\n"
-        "В личку ничего не отправляется.\n"
-        "В проверке — блок в сообщении «Я не робот». Оно пропадает, "
-        "когда человек подтвердил вход или не успел.\n"
-        "Пост в чат — каждые 150 сообщений. Предыдущий такой пост "
-        "удаляется через 350 сообщений.\n"
-        "Лично автору — человек написал в чат или поставил реакцию, и бот показывает "
-        "рекламу в этом же чате только ему. Остальные её не видят. "
-        "Админам и участникам с тегом не показывается.\n\n"
+        "Вся реклама эфемерная: в группе её видит только тот, кому она показана. "
+        "Обычных сообщений с рекламой бот не отправляет.\n\n"
+        "В проверке — блок в сообщении «Я не робот», которое видит только новичок. "
+        "Если в чате проверку видят все, рекламы в ней нет.\n"
+        f"Каждому в чате — до {ADS_PER_DAY} раз в день на человека, "
+        f"не чаще раза в {human_seconds(AD_MIN_GAP)}. Показ в момент, когда человек "
+        "пишет, исправляет сообщение или ставит реакцию: он в сети, и реклама доходит. "
+        "Счётчик обнуляется в полночь по Москве, реклама в проверке тоже считается. "
+        "Админам, владельцу и участникам с тегом не показывается.\n\n"
         f"Общий выключатель: {on(ads['enabled'])}\n"
         f"В проверке: {on(ads['in_welcome'])}\n"
-        f"Пост в чат: {on(ads['separate'])}\n"
-        f"Лично автору: {on(ads.get('personal', 0))}, "
-        f"{cooldown_label(int(ads.get('personal_cooldown') or 0))}\n"
+        f"Каждому в чате: {on(ads.get('personal', 0))}\n"
         f"Текст: {preview}\n"
         f"Кнопка: {escape(button)}"
     )
@@ -276,16 +276,10 @@ def owner_keyboard(ads: dict) -> InlineKeyboardMarkup:
     return _rows([
         [btn(f"Реклама: {on(ads['enabled'])}", "ot:en")],
         [btn(f"В проверке: {on(ads['in_welcome'])}", "ot:iw")],
-        [btn(f"Пост в чат: {on(ads['separate'])}", "ot:sp")],
-        [btn(f"Лично автору: {on(ads.get('personal', 0))}", "ot:pm")],
-        [btn(
-            "Как часто: " + cooldown_label(int(ads.get("personal_cooldown") or 0)),
-            "oy:pc",
-        )],
+        [btn(f"Каждому в чате: {on(ads.get('personal', 0))}", "ot:pm")],
         [btn("Текст рекламы", "ow")],
         [btn("Кнопка", "ob")],
         [btn("Превью писем", "op")],
-        [btn("Отправить во все чаты", "os")],
         [btn("В меню", "m")],
     ])
 

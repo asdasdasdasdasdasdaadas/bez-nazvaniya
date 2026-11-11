@@ -9,18 +9,12 @@ from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.types import Message, User
 
+from bot.ads import offer_ad
 from bot.app import App
-from bot.logic import (
-    AD_EVERY_MESSAGES,
-    AD_KEEP_MESSAGES,
-    DEFAULT_WELCOME,
-    ad_message_text,
-    build_welcome_text,
-)
+from bot.logic import DEFAULT_WELCOME, build_welcome_text, msk_day
 from bot.ops import (
     ban_member,
     clear_restrictions,
-    delete_message,
     delete_prompt,
     ensure_chat,
     fade,
@@ -32,7 +26,7 @@ from bot.ops import (
     send_html,
     warn_rights_once,
 )
-from bot.panel import ad_keyboard, check_keyboard
+from bot.panel import check_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -52,16 +46,8 @@ def _ads_inside(ads: dict) -> bool:
     return bool(ads["enabled"] and ads["in_welcome"] and (ads["text"] or "").strip())
 
 
-def _ads_separate(ads: dict) -> bool:
-    return bool(ads["enabled"] and ads["separate"] and (ads["text"] or "").strip())
-
-
-def _ads_personal(ads: dict) -> bool:
-    return bool(ads["enabled"] and ads.get("personal") and (ads["text"] or "").strip())
-
-
-def check_body(chat: dict, user_name: str, username: str, ads: dict) -> str:
-    inside = _ads_inside(ads)
+def check_body(chat: dict, user_name: str, username: str, ads: dict, *, with_ad: bool = True) -> str:
+    inside = with_ad and _ads_inside(ads)
     text = build_welcome_text(
         chat["welcome_text"] or DEFAULT_WELCOME,
         name=user_name,
@@ -103,12 +89,15 @@ async def begin_captcha(bot: Bot, app: App, chat, user: User) -> None:
     ads = await app.db.get_ads()
     username = f"@{user.username}" if user.username else "без username"
     name = user.full_name or user.first_name or "участник"
-    body = check_body(row, name, username, ads)
     lead = f"{mention(user.id, name)}, подтвердите, что вы человек."
-    text = f"{lead}\n\n{body}" if body else lead
-    markup = check_keyboard(chat.id, user.id, ads, _ads_inside(ads))
+
+    def compose(with_ad: bool):
+        body = check_body(row, name, username, ads, with_ad=with_ad)
+        text = f"{lead}\n\n{body}" if body else lead
+        return text, check_keyboard(chat.id, user.id, ads, with_ad and _ads_inside(ads))
 
     if int(row.get("captcha_private", 1)):
+        text, markup = compose(with_ad=True)
         try:
             ephemeral_id = await send_ephemeral(bot, chat.id, user.id, text, markup)
         except TelegramAPIError as exc:
@@ -116,8 +105,14 @@ async def begin_captcha(bot: Bot, app: App, chat, user: User) -> None:
             ephemeral_id = None
         if ephemeral_id:
             await app.db.set_captcha_messages(chat.id, user.id, ephemeral_id=ephemeral_id)
+            if _ads_inside(ads):
+                # Реклама в проверке тоже считается в дневной лимит показов.
+                now = int(time.time())
+                await app.db.record_ad_view(user.id, day=msk_day(now), now=now)
             return
 
+    # Проверку видят все — рекламу в неё не кладём, её должен видеть только сам человек.
+    text, markup = compose(with_ad=False)
     try:
         prompt = await send_html(bot, chat.id, text, markup)
     except TelegramAPIError:
@@ -217,112 +212,20 @@ async def cancel_because_left(bot: Bot, app: App, chat_id: int, user_id: int) ->
     await delete_prompt(bot, chat_id, user_id, pending)
 
 
-async def send_public_ad(bot: Bot, chat_id: int, ads: dict) -> int | None:
-    if not (ads.get("text") or "").strip():
-        return None
-    try:
-        message = await send_html(
-            bot,
-            chat_id,
-            ad_message_text(ads["text"]),
-            ad_keyboard(ads),
-            preview=True,
-        )
-    except TelegramAPIError:
-        logger.info("Реклама не ушла в чат %s", chat_id)
-        return None
-    return message.message_id
-
-
 async def note_chat_message(bot: Bot, app: App, message: Message) -> None:
+    """Любое сообщение или правка человека в чате — повод показать ему рекламу."""
     user = message.from_user
     if user is None or user.is_bot:
         return
     if message.new_chat_members or message.left_chat_member:
         return
-    bumped = await app.db.bump_chat_messages(message.chat.id, drop_after=AD_KEEP_MESSAGES)
-    if bumped is None:
-        return
-    count, stale = bumped
-    for message_id in stale:
-        await delete_message(bot, message.chat.id, message_id)
-    ads = await app.db.get_ads()
-    await send_personal_ad(bot, app, message, ads)
-    if count % AD_EVERY_MESSAGES != 0:
-        return
-    if not _ads_separate(ads):
-        return
-    posted = await send_public_ad(bot, message.chat.id, ads)
-    if posted is not None:
-        await app.db.remember_posted_ad(message.chat.id, posted, count)
-
-
-async def send_personal_ad(bot: Bot, app: App, message: Message, ads: dict) -> None:
-    """Реклама автору сообщения. Видит только он, остальные в чате — нет."""
-    if (message.text or "").startswith("/"):
-        return
-    await offer_personal_ad(
+    await offer_ad(
         bot,
         app,
         message.chat.id,
-        message.from_user.id,
-        ads,
+        user.id,
         sender_tag=getattr(message, "sender_tag", None),
     )
-
-
-async def ad_exempt(bot: Bot, app: App, chat_id: int, user_id: int) -> bool:
-    """Админам и участникам с тегом личную рекламу не показываем."""
-    admins = await app.admins.ids(bot, chat_id)
-    if admins is None or user_id in admins:
-        return True
-    try:
-        member = await bot.get_chat_member(chat_id, user_id)
-    except TelegramAPIError:
-        return True
-    if member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}:
-        return True
-    # Bot API 9.5: тег обычного участника. В aiogram поля пока нет, приходит как extra.
-    return bool(getattr(member, "tag", None))
-
-
-async def offer_personal_ad(
-    bot: Bot,
-    app: App,
-    chat_id: int,
-    user_id: int,
-    ads: dict,
-    *,
-    sender_tag: str | None = None,
-) -> bool:
-    """Показывает рекламу человеку в чате эфемерно, если пора. True — если отправили."""
-    if not _ads_personal(ads):
-        return False
-    if sender_tag:  # у автора сообщения есть тег или звание
-        return False
-    # Сначала отметка паузы: так лишний раз не спрашиваем Telegram про участника.
-    if not await app.db.claim_personal_ad(
-        chat_id,
-        user_id,
-        now=int(time.time()),
-        cooldown=int(ads.get("personal_cooldown") or 0),
-    ):
-        return False
-    if await ad_exempt(bot, app, chat_id, user_id):
-        return False
-    try:
-        await send_ephemeral(
-            bot,
-            chat_id,
-            user_id,
-            ad_message_text(ads["text"]),
-            ad_keyboard(ads),
-            preview=True,
-        )
-    except TelegramAPIError as exc:
-        logger.info("Личная реклама не ушла в %s: %s", chat_id, exc)
-        return False
-    return True
 
 
 async def watch(bot: Bot, app: App) -> None:

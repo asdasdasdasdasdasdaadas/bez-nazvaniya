@@ -17,7 +17,6 @@ from bot.ops import (
     EMPTY_KEYBOARD,
     PREVIEW_OFF,
     clear_restrictions,
-    delete_message,
     delete_prompt,
     edit_html,
     fade,
@@ -280,7 +279,12 @@ async def ask_welcome(callback: CallbackQuery, state: FSMContext, app: App, bot)
     await callback.answer()
     ads = await app.db.get_ads()
     user = callback.from_user
-    inside = bool(ads["enabled"] and ads["in_welcome"] and (ads["text"] or "").strip())
+    inside = bool(
+        ads["enabled"]
+        and ads["in_welcome"]
+        and (ads["text"] or "").strip()
+        and int(chat.get("captcha_private", 1))
+    )
     prompt = welcome_prompt(
         chat["welcome_text"],
         name=user.full_name or "Имя",

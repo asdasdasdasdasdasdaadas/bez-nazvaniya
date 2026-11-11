@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-
 from aiogram import F, Router
 from aiogram.enums import ChatType, ParseMode
 from aiogram.exceptions import TelegramBadRequest
@@ -10,10 +8,9 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from bot.app import App
-from bot.captcha import send_public_ad
-from bot.logic import OWNER_CYCLES, OWNER_TOGGLES, next_in_cycle, valid_http_url
+from bot.logic import OWNER_TOGGLES, valid_http_url
 from bot.ops import PREVIEW_OFF, edit_html
-from bot.panel import ad_prompt, btn, button_editor_keyboard, button_prompt, owner_keyboard, owner_text
+from bot.panel import ad_prompt, button_editor_keyboard, button_prompt, owner_keyboard, owner_text
 from bot.samples import send_member_preview
 from bot.states import Edit
 
@@ -79,24 +76,6 @@ async def owner_toggle(callback: CallbackQuery, state: FSMContext, app: App) -> 
     await _panel(callback.message, app, edit=True)
 
 
-@router.callback_query(F.data.startswith("oy:"))
-async def owner_cycle(callback: CallbackQuery, state: FSMContext, app: App) -> None:
-    await state.clear()
-    if not _owner(callback, app):
-        await callback.answer("Только для создателя бота", show_alert=True)
-        return
-    key = callback.data.split(":", 1)[1]
-    if key not in OWNER_CYCLES:
-        await callback.answer()
-        return
-    ads = await app.db.get_ads()
-    field, options = OWNER_CYCLES[key]
-    new = next_in_cycle(options, ads[field])
-    await app.db.update_ads(**{field: new})
-    await callback.answer("Сохранено")
-    await _panel(callback.message, app, edit=True)
-
-
 @router.callback_query(F.data == "ow")
 async def ask_ad_text(callback: CallbackQuery, state: FSMContext, app: App) -> None:
     if not _owner(callback, app):
@@ -157,56 +136,6 @@ async def preview(callback: CallbackQuery, app: App, bot) -> None:
 @router.callback_query(F.data == "preview")
 async def preview_button(callback: CallbackQuery) -> None:
     await callback.answer("Это пример. В чат никого не пускает.", show_alert=True)
-
-
-@router.callback_query(F.data == "os")
-async def ask_broadcast(callback: CallbackQuery, app: App) -> None:
-    if not _owner(callback, app):
-        await callback.answer("Только для создателя бота", show_alert=True)
-        return
-    ads = await app.db.get_ads()
-    if not (ads["text"] or "").strip():
-        await callback.answer("Сначала задайте текст рекламы", show_alert=True)
-        return
-    chats = [chat for chat in await app.db.active_chats() if int(chat["moderation_enabled"])]
-    markup = InlineKeyboardMarkup(
-        inline_keyboard=[[btn("Отправить", "os1"), btn("Назад", "o")]]
-    )
-    await callback.answer()
-    await edit_html(
-        callback.message,
-        f"Отправить рекламу в {len(chats)} подключённых чатов?",
-        markup,
-    )
-
-
-@router.callback_query(F.data == "os1")
-async def do_broadcast(callback: CallbackQuery, app: App, bot) -> None:
-    if not _owner(callback, app):
-        await callback.answer("Только для создателя бота", show_alert=True)
-        return
-    await callback.answer()
-    try:
-        await edit_html(callback.message, "Отправляю…", None)
-    except TelegramBadRequest:
-        pass
-    ads = await app.db.get_ads()
-    sent = 0
-    failed = 0
-    for chat in await app.db.active_chats():
-        if not int(chat["moderation_enabled"]):
-            continue
-        if await send_public_ad(bot, chat["chat_id"], ads) is not None:
-            sent += 1
-        else:
-            failed += 1
-        await asyncio.sleep(0.05)
-    await _panel(
-        callback.message,
-        app,
-        edit=True,
-        extra=f"\n\nОтправлено: {sent}. Не ушло: {failed}.",
-    )
 
 
 @router.message(Edit.ad_text, F.chat.type == ChatType.PRIVATE, F.text, ~F.text.startswith("/"))

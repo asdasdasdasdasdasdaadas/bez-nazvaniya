@@ -18,6 +18,7 @@ from aiogram.types import (
 )
 from aiogram import BaseMiddleware
 
+from bot.ads import cleanup_public_ads
 from bot.app import App
 from bot.captcha import note_chat_message, watch
 from bot.config import Settings, load_settings
@@ -38,10 +39,12 @@ class InjectMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
-class AdCountMiddleware(BaseMiddleware):
+class AdActionMiddleware(BaseMiddleware):
+    """После обработки сообщения или правки в группе — повод показать автору рекламу."""
+
     async def __call__(self, handler, event, data):
         result = await handler(event, data)
-        message = getattr(event, "message", None)
+        message = getattr(event, "message", None) or getattr(event, "edited_message", None)
         if not isinstance(message, Message):
             return result
         if message.chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP}:
@@ -53,7 +56,7 @@ class AdCountMiddleware(BaseMiddleware):
         try:
             await note_chat_message(bot, app, message)
         except Exception:
-            logger.exception("Не посчитал сообщение для рекламы")
+            logger.exception("Не показал рекламу по сообщению")
         return result
 
 
@@ -116,10 +119,11 @@ async def run(settings: Settings) -> None:
         )
         dp = Dispatcher(storage=MemoryStorage())
         dp.update.middleware(InjectMiddleware(app))
-        dp.update.middleware(AdCountMiddleware())
+        dp.update.middleware(AdActionMiddleware())
         setup(dp)
         dp.error.register(_on_error)
         watcher = asyncio.create_task(watch(bot, app))
+        cleanup = asyncio.create_task(cleanup_public_ads(bot, app))
         try:
             await bot.delete_webhook(drop_pending_updates=False)
             await _commands(bot, settings.owner_id)
@@ -136,11 +140,12 @@ async def run(settings: Settings) -> None:
                 ],
             )
         finally:
-            watcher.cancel()
-            try:
-                await watcher
-            except asyncio.CancelledError:
-                pass
+            for task in (watcher, cleanup):
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
     finally:
         await db.close()
         await bot.session.close()

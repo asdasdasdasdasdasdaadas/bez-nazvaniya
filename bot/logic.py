@@ -74,23 +74,21 @@ CYCLES: dict[str, tuple[str, list]] = {
     "wac": ("warn_action", ["mute", "ban"]),
 }
 
-# 0 — после каждого сообщения человека.
-PERSONAL_COOLDOWNS = [0, 3600, 21600, 86400]
-
 OWNER_TOGGLES = {
     "en": "enabled",
     "iw": "in_welcome",
-    "sp": "separate",
     "pm": "personal",
 }
 
-OWNER_CYCLES = {
-    "n": ("every_n", [1, 2, 3, 5, 10, 20]),
-    "pc": ("personal_cooldown", PERSONAL_COOLDOWNS),
-}
+# Реклама каждому участнику: показ по его действию в чате.
+MSK = timezone(timedelta(hours=3))
+ADS_PER_DAY = 3
+AD_MIN_GAP = 2 * 3600
 
-AD_EVERY_MESSAGES = 150
-AD_KEEP_MESSAGES = 350
+
+def msk_day(now: float) -> str:
+    """Календарный день по Москве: счётчик показов обнуляется в полночь."""
+    return datetime.fromtimestamp(now, MSK).strftime("%Y-%m-%d")
 
 SPAM_KEYS = {"lnk", "fwd", "rep", "cps", "stk", "flc", "flw", "act", "mut", "new", "wln", "wac"}
 
@@ -107,13 +105,6 @@ def plural(value: int, one: str, few: str, many: str) -> str:
     if 2 <= tail <= 4:
         return few
     return many
-
-
-def cooldown_label(seconds: int) -> str:
-    if seconds <= 0:
-        return "после каждого сообщения"
-    named = {3600: "раз в час", 86400: "раз в сутки"}
-    return named.get(seconds, f"раз в {human_seconds(seconds)}")
 
 
 def human_seconds(seconds: int) -> str:

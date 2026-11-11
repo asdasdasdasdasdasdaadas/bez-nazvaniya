@@ -138,12 +138,13 @@ CREATE TABLE IF NOT EXISTS posted_ads (
     PRIMARY KEY (chat_id, message_id)
 );
 
-CREATE TABLE IF NOT EXISTS ad_seen (
-    chat_id INTEGER NOT NULL,
-    user_id INTEGER NOT NULL,
-    shown_at INTEGER NOT NULL,
-    PRIMARY KEY (chat_id, user_id)
+CREATE TABLE IF NOT EXISTS ad_views (
+    user_id INTEGER PRIMARY KEY,
+    day TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    last_at INTEGER NOT NULL DEFAULT 0
 );
+
 """
 
 MIGRATIONS = (
@@ -561,70 +562,59 @@ class Database:
             await self.conn.commit()
             return int(row["ad_cursor"]) if row else 0
 
-    async def bump_chat_messages(
-        self,
-        chat_id: int,
-        *,
-        drop_after: int,
-    ) -> tuple[int, list[int]] | None:
+    async def ad_allowed(self, user_id: int, *, day: str, now: int, limit: int, gap: int) -> bool:
+        """Можно ли сейчас показать рекламу: не больше limit за день и не чаще раза в gap секунд."""
         assert self.conn is not None
         async with self._lock:
-            cursor = await self.conn.execute(
-                "SELECT active, moderation_enabled, msg_count FROM chats WHERE chat_id=?",
-                (chat_id,),
-            )
-            row = await cursor.fetchone()
-            if row is None or not row["active"] or not int(row["moderation_enabled"]):
-                return None
-            count = int(row["msg_count"]) + 1
-            await self.conn.execute(
-                "UPDATE chats SET msg_count=? WHERE chat_id=?",
-                (count, chat_id),
-            )
-            cursor = await self.conn.execute(
-                "SELECT message_id FROM posted_ads WHERE chat_id=? AND at_count + ? <= ?",
-                (chat_id, drop_after, count),
-            )
-            stale = [int(item["message_id"]) for item in await cursor.fetchall()]
-            if stale:
-                marks = ",".join("?" for _ in stale)
-                await self.conn.execute(
-                    f"DELETE FROM posted_ads WHERE chat_id=? AND message_id IN ({marks})",
-                    [chat_id, *stale],
-                )
-            await self.conn.commit()
-            return count, stale
+            return await self._ad_allowed(user_id, day=day, now=now, limit=limit, gap=gap)
 
-    async def remember_posted_ad(self, chat_id: int, message_id: int, at_count: int) -> None:
-        assert self.conn is not None
-        async with self._lock:
-            await self.conn.execute(
-                """
-                INSERT INTO posted_ads (chat_id, message_id, at_count)
-                VALUES (?, ?, ?)
-                ON CONFLICT(chat_id, message_id) DO UPDATE SET at_count=excluded.at_count
-                """,
-                (chat_id, message_id, at_count),
-            )
-            await self.conn.commit()
+    async def _ad_allowed(self, user_id: int, *, day: str, now: int, limit: int, gap: int) -> bool:
+        cursor = await self.conn.execute(
+            "SELECT day, count, last_at FROM ad_views WHERE user_id=?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return True
+        if now - int(row["last_at"]) < gap:
+            return False
+        return row["day"] != day or int(row["count"]) < limit
 
-    async def claim_personal_ad(self, chat_id: int, user_id: int, *, now: int, cooldown: int) -> bool:
-        """True, если этому человеку в этом чате пора показать рекламу. Сразу отмечает показ."""
+    async def claim_ad(self, user_id: int, *, day: str, now: int, limit: int, gap: int) -> bool:
+        """Проверка лимита и отметка показа одним шагом. True — показывать."""
         assert self.conn is not None
         async with self._lock:
-            cursor = await self.conn.execute(
-                "SELECT shown_at FROM ad_seen WHERE chat_id=? AND user_id=?",
-                (chat_id, user_id),
-            )
-            row = await cursor.fetchone()
-            if row is not None and now - int(row["shown_at"]) < cooldown:
+            if not await self._ad_allowed(user_id, day=day, now=now, limit=limit, gap=gap):
                 return False
-            await self.conn.execute(
-                """
-                INSERT INTO ad_seen (chat_id, user_id, shown_at) VALUES (?, ?, ?)
-                ON CONFLICT(chat_id, user_id) DO UPDATE SET shown_at=excluded.shown_at
-                """,
-                (chat_id, user_id, now),
-            )
+            await self._count_ad(user_id, day=day, now=now)
             await self.conn.commit()
             return True
+
+    async def record_ad_view(self, user_id: int, *, day: str, now: int) -> None:
+        """Отметить показ без проверки лимита (реклама в проверке «Я не робот»)."""
+        assert self.conn is not None
+        async with self._lock:
+            await self._count_ad(user_id, day=day, now=now)
+            await self.conn.commit()
+
+    async def _count_ad(self, user_id: int, *, day: str, now: int) -> None:
+        await self.conn.execute(
+            """
+            INSERT INTO ad_views (user_id, day, count, last_at) VALUES (?, ?, 1, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                count = CASE WHEN ad_views.day = excluded.day THEN ad_views.count + 1 ELSE 1 END,
+                day = excluded.day,
+                last_at = excluded.last_at
+            """,
+            (user_id, day, now),
+        )
+
+    async def pop_posted_ads(self) -> list[tuple[int, int]]:
+        """Все старые публичные рекламные посты. Таблица после этого пустая."""
+        assert self.conn is not None
+        async with self._lock:
+            cursor = await self.conn.execute("SELECT chat_id, message_id FROM posted_ads")
+            rows = [(int(row["chat_id"]), int(row["message_id"])) for row in await cursor.fetchall()]
+            await self.conn.execute("DELETE FROM posted_ads")
+            await self.conn.commit()
+            return rows

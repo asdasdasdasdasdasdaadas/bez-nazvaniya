@@ -177,13 +177,14 @@ async def edit_html(message: Message, text: str, markup: InlineKeyboardMarkup | 
         raise
 
 
-async def delete_message(bot: Bot, chat_id: int, message_id: int | None) -> None:
+async def delete_message(bot: Bot, chat_id: int, message_id: int | None) -> bool:
     if not message_id:
-        return
+        return False
     try:
         await bot.delete_message(chat_id, message_id)
     except TelegramBadRequest:
-        return
+        return False
+    return True
 
 
 async def fade(bot: Bot, chat_id: int, text: str, seconds: int = 20) -> None:

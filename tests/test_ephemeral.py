@@ -13,7 +13,11 @@ from aiogram.types import Message
 import bot.captcha as captcha
 from bot.app import App
 from bot.db import Database
-from bot.logic import SpamTracker, cooldown_label
+from datetime import datetime
+
+import bot.ads as ads_module
+from bot.handlers.reactions import on_reaction
+from bot.logic import MSK, SpamTracker, msk_day
 from bot.ops import AdminCache, DeleteEphemeralMessage
 
 
@@ -58,30 +62,6 @@ def test_old_database_gets_new_columns():
             await db.close()
 
     asyncio.run(scenario())
-
-
-def test_personal_ad_cooldown():
-    async def scenario():
-        db = Database(_tmp_db())
-        await db.connect()
-        try:
-            assert await db.claim_personal_ad(-1, 5, now=1000, cooldown=3600)
-            assert not await db.claim_personal_ad(-1, 5, now=2000, cooldown=3600)
-            assert await db.claim_personal_ad(-1, 6, now=2000, cooldown=3600)
-            assert await db.claim_personal_ad(-2, 5, now=2000, cooldown=3600)
-            assert await db.claim_personal_ad(-1, 5, now=4600, cooldown=3600)
-            assert await db.claim_personal_ad(-1, 5, now=4600, cooldown=0)
-        finally:
-            await db.close()
-
-    asyncio.run(scenario())
-
-
-def test_cooldown_label():
-    assert cooldown_label(0) == "после каждого сообщения"
-    assert cooldown_label(3600) == "раз в час"
-    assert cooldown_label(21600) == "раз в 6 часов"
-    assert cooldown_label(86400) == "раз в сутки"
 
 
 def test_ephemeral_request_shape():
@@ -200,107 +180,6 @@ def test_captcha_public_when_setting_off():
     assert pending["prompt_message_id"] == 555
 
 
-def test_personal_ad_sent_once_per_cooldown():
-    async def scenario():
-        db = Database(_tmp_db())
-        await db.connect()
-        try:
-            await db.upsert_chat(-100, "Чат", "supergroup", None)
-            await db.update_ads(
-                enabled=1, personal=1, personal_cooldown=3600, text="Купи слона", in_welcome=0
-            )
-            app = App(db, 1, "bot", 999, SpamTracker(), AdminCache())
-            fake = FakeBot(ephemeral_fails=False)
-            user = SimpleNamespace(id=5, is_bot=False)
-
-            def msg(text):
-                return SimpleNamespace(
-                    from_user=user,
-                    chat=SimpleNamespace(id=-100),
-                    text=text,
-                    new_chat_members=None,
-                    left_chat_member=None,
-                )
-
-            await captcha.note_chat_message(fake, app, msg("привет"))
-            await captcha.note_chat_message(fake, app, msg("ещё раз"))
-            await captcha.note_chat_message(fake, app, msg("/start"))
-            sent = [call for call in fake.calls if call[0] == "ephemeral"]
-            assert sent == [("ephemeral", -100, {"receiver_user_id": 5})]
-
-            await db.update_chat(-100, moderation_enabled=0)
-            await db.update_ads(personal_cooldown=0)
-            await captcha.note_chat_message(fake, app, msg("пауза"))
-            assert len([call for call in fake.calls if call[0] == "ephemeral"]) == 1
-        finally:
-            await db.close()
-
-    asyncio.run(scenario())
-
-
-def _ads_scenario(fake, steps):
-    """steps(app) — корутина; возвращает получателей эфемерной рекламы."""
-
-    async def scenario():
-        db = Database(_tmp_db())
-        await db.connect()
-        try:
-            await db.upsert_chat(-100, "Чат", "supergroup", None)
-            await db.update_ads(enabled=1, personal=1, personal_cooldown=0, text="Реклама")
-            app = App(db, 1, "bot", 999, SpamTracker(), AdminCache())
-            await steps(app)
-            return [call[2]["receiver_user_id"] for call in fake.calls if call[0] == "ephemeral"]
-        finally:
-            await db.close()
-
-    return asyncio.run(scenario())
-
-
-def _message(user_id, text="привет", sender_tag=None):
-    return SimpleNamespace(
-        from_user=SimpleNamespace(id=user_id, is_bot=False),
-        chat=SimpleNamespace(id=-100),
-        text=text,
-        sender_tag=sender_tag,
-        new_chat_members=None,
-        left_chat_member=None,
-    )
-
-
-def test_admins_and_tagged_members_get_no_ads():
-    fake = FakeBot(ephemeral_fails=False, admins={10}, tags={20: "модератор"})
-
-    async def steps(app):
-        await captcha.note_chat_message(fake, app, _message(10))
-        await captcha.note_chat_message(fake, app, _message(20))
-        await captcha.note_chat_message(fake, app, _message(30, sender_tag="VIP"))
-        await captcha.note_chat_message(fake, app, _message(40))
-
-    assert _ads_scenario(fake, steps) == [40]
-
-
-def test_reaction_shows_ad_to_reactor():
-    from bot.handlers.reactions import on_reaction
-
-    fake = FakeBot(ephemeral_fails=False, admins={10})
-
-    def reaction(user_id, new):
-        return SimpleNamespace(
-            user=SimpleNamespace(id=user_id, is_bot=False),
-            chat=SimpleNamespace(id=-100),
-            new_reaction=new,
-        )
-
-    async def steps(app):
-        await on_reaction(reaction(50, [{"type": "emoji", "emoji": "👍"}]), fake, app)
-        await on_reaction(reaction(60, []), fake, app)
-        await on_reaction(reaction(10, [{"type": "emoji", "emoji": "👍"}]), fake, app)
-        await app.db.update_chat(-100, moderation_enabled=0)
-        await on_reaction(reaction(70, [{"type": "emoji", "emoji": "👍"}]), fake, app)
-
-    assert _ads_scenario(fake, steps) == [50]
-
-
 def test_welcome_contains_ad_when_only_newcomer_sees_it():
     async def scenario():
         db = Database(_tmp_db())
@@ -351,3 +230,213 @@ def test_welcome_contains_ad_when_only_newcomer_sees_it():
     buttons = [row[0] for row in markup.inline_keyboard]
     assert buttons[0].text == "Я не робот"
     assert buttons[1].text == "Подключить" and buttons[1].url == "https://example.com"
+
+
+
+def _msk(hour, minute=0, day=11):
+    return int(datetime(2026, 11, day, hour, minute, tzinfo=MSK).timestamp())
+
+
+def test_msk_day_resets_at_moscow_midnight():
+    assert msk_day(_msk(23, 59)) == "2026-11-11"
+    assert msk_day(_msk(0, 0, day=12)) == "2026-11-12"
+
+
+def test_daily_limit_and_gap():
+    async def scenario():
+        db = Database(_tmp_db())
+        await db.connect()
+        try:
+            def claim(t):
+                return db.claim_ad(5, day=msk_day(t), now=t, limit=3, gap=7200)
+
+            results = [
+                await claim(_msk(9)),
+                await claim(_msk(9, 30)),   # меньше 2 часов
+                await claim(_msk(11)),
+                await claim(_msk(13)),
+                await claim(_msk(16)),      # четвёртый за день
+                await claim(_msk(9, day=12)),  # новый день
+            ]
+            await db.record_ad_view(6, day=msk_day(_msk(9)), now=_msk(9))
+            other = await db.claim_ad(6, day=msk_day(_msk(10)), now=_msk(10), limit=3, gap=7200)
+            return results, other
+        finally:
+            await db.close()
+
+    results, other = asyncio.run(scenario())
+    assert results == [True, False, True, True, False, True]
+    assert other is False  # реклама в проверке считается и держит паузу
+
+
+def test_public_captcha_has_no_ad():
+    async def scenario():
+        db = Database(_tmp_db())
+        await db.connect()
+        try:
+            await db.upsert_chat(-100, "Чат", "supergroup", None)
+            await db.update_chat(-100, captcha_private=0)
+            await db.update_ads(enabled=1, in_welcome=1, text="Лучший VPN",
+                                button_text="Подключить", button_url="https://example.com")
+            app = App(db, 1, "bot", 999, SpamTracker(), AdminCache())
+            sent = []
+
+            class PublicBot:
+                async def send_message(self, chat_id, text, reply_markup=None, **kwargs):
+                    sent.append((text, reply_markup))
+                    return SimpleNamespace(message_id=1)
+
+            async def ensure(bot, db_, bot_id, chat):
+                return await db_.get_chat(chat.id)
+
+            async def no(*_args):
+                return False
+
+            saved = (captcha.ensure_chat, captcha.is_chat_admin, captcha.lock_member)
+            captcha.ensure_chat, captcha.is_chat_admin, captcha.lock_member = ensure, no, no
+            try:
+                user = SimpleNamespace(id=5, is_bot=False, username=None, full_name="Вася", first_name="Вася")
+                await captcha.begin_captcha(PublicBot(), app, SimpleNamespace(id=-100), user)
+            finally:
+                captcha.ensure_chat, captcha.is_chat_admin, captcha.lock_member = saved
+            return sent
+        finally:
+            await db.close()
+
+    [(text, markup)] = asyncio.run(scenario())
+    assert "Лучший VPN" not in text
+    assert [row[0].text for row in markup.inline_keyboard] == ["Я не робот"]
+
+
+def _ads_scenario(fake, steps):
+    async def scenario():
+        db = Database(_tmp_db())
+        await db.connect()
+        ads_module._exempt.clear()
+        try:
+            await db.upsert_chat(-100, "Чат", "supergroup", None)
+            await db.upsert_chat(-200, "Второй", "supergroup", None)
+            await db.update_ads(enabled=1, personal=1, text="Реклама")
+            app = App(db, 1, "bot", 999, SpamTracker(), AdminCache())
+            result = await steps(app, db)
+            sent = [(call[1], call[2]["receiver_user_id"]) for call in fake.calls if call[0] == "ephemeral"]
+            return sent, result
+        finally:
+            await db.close()
+
+    return asyncio.run(scenario())
+
+
+def test_any_action_shows_ad_up_to_three_times_a_day():
+    fake = FakeBot(ephemeral_fails=False)
+
+    async def steps(app, db):
+        t = _msk(9)
+        shown = []
+        for minutes in (0, 10, 130, 135, 260, 400, 600):
+            shown.append(await ads_module.offer_ad(fake, app, -100, 30, now=t + minutes * 60))
+        # Лимит общий на человека, а не на чат.
+        shown.append(await ads_module.offer_ad(fake, app, -200, 30, now=t + 700 * 60))
+        return shown
+
+    sent, shown = _ads_scenario(fake, steps)
+    assert shown == [True, False, True, False, True, False, False, False]
+    assert sent == [(-100, 30)] * 3
+
+
+def test_admins_tagged_and_unverified_get_no_ads():
+    fake = FakeBot(ephemeral_fails=False, admins={10}, tags={20: "модератор"})
+
+    async def steps(app, db):
+        await db.add_pending(-100, 60, 10**10)
+        return [
+            await ads_module.offer_ad(fake, app, -100, 10),
+            await ads_module.offer_ad(fake, app, -100, 20),
+            await ads_module.offer_ad(fake, app, -100, 30, sender_tag="VIP"),
+            await ads_module.offer_ad(fake, app, -100, 60),
+            await ads_module.offer_ad(fake, app, -100, 40),
+        ]
+
+    sent, shown = _ads_scenario(fake, steps)
+    assert shown == [False, False, False, False, True]
+    assert sent == [(-100, 40)]
+
+
+def test_no_ads_when_off_or_moderation_paused():
+    fake = FakeBot(ephemeral_fails=False)
+
+    async def steps(app, db):
+        await db.update_ads(personal=0)
+        off = await ads_module.offer_ad(fake, app, -100, 30)
+        await db.update_ads(personal=1)
+        await db.update_chat(-100, moderation_enabled=0)
+        paused = await ads_module.offer_ad(fake, app, -100, 30)
+        return off, paused
+
+    sent, result = _ads_scenario(fake, steps)
+    assert result == (False, False) and sent == []
+
+
+def test_message_and_reaction_trigger_ad():
+    fake = FakeBot(ephemeral_fails=False)
+
+    async def steps(app, db):
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(id=30, is_bot=False),
+            chat=SimpleNamespace(id=-100),
+            text="привет",
+            sender_tag=None,
+            new_chat_members=None,
+            left_chat_member=None,
+        )
+        await captcha.note_chat_message(fake, app, message)
+
+        def reaction(user_id, new):
+            return SimpleNamespace(
+                user=SimpleNamespace(id=user_id, is_bot=False),
+                chat=SimpleNamespace(id=-100),
+                new_reaction=new,
+            )
+
+        await on_reaction(reaction(40, [{"type": "emoji", "emoji": "👍"}]), fake, app)
+        await on_reaction(reaction(50, []), fake, app)
+
+    sent, _ = _ads_scenario(fake, steps)
+    assert sent == [(-100, 30), (-100, 40)]
+
+
+def test_old_public_ads_are_deleted_on_start():
+    deleted = []
+
+    class DeletingBot:
+        async def delete_message(self, chat_id, message_id):
+            deleted.append((chat_id, message_id))
+            return True
+
+    async def scenario():
+        db = Database(_tmp_db())
+        await db.connect()
+        try:
+            await db.conn.execute(
+                "INSERT INTO posted_ads (chat_id, message_id, at_count) VALUES (-1, 11, 150), (-2, 22, 300)"
+            )
+            await db.conn.commit()
+            app = App(db, 1, "bot", 999, SpamTracker(), AdminCache())
+            saved = ads_module.asyncio.sleep
+
+            async def no_sleep(_):
+                return None
+
+            ads_module.asyncio.sleep = no_sleep
+            try:
+                removed = await ads_module.cleanup_public_ads(DeletingBot(), app)
+                again = await ads_module.cleanup_public_ads(DeletingBot(), app)
+            finally:
+                ads_module.asyncio.sleep = saved
+            return removed, again
+        finally:
+            await db.close()
+
+    removed, again = asyncio.run(scenario())
+    assert sorted(deleted) == [(-2, 22), (-1, 11)]
+    assert (removed, again) == (2, 0)

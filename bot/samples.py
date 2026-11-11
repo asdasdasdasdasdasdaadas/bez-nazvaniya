@@ -6,13 +6,7 @@ from aiogram import Bot
 from aiogram.types import User
 
 from bot.captcha import FAIL_TEXT, check_body
-from bot.logic import (
-    AD_EVERY_MESSAGES,
-    AD_KEEP_MESSAGES,
-    ad_message_text,
-    cooldown_label,
-    human_seconds,
-)
+from bot.logic import ADS_PER_DAY, ad_message_text, human_seconds
 from bot.ops import mention, send_html
 from bot.panel import SPAM_REASON, ad_keyboard, sample_check_keyboard
 
@@ -21,8 +15,8 @@ def ads_inside(ads: dict) -> bool:
     return bool(ads.get("enabled") and ads.get("in_welcome") and (ads.get("text") or "").strip())
 
 
-def ads_separate(ads: dict) -> bool:
-    return bool(ads.get("enabled") and ads.get("separate") and (ads.get("text") or "").strip())
+def ads_for_members(ads: dict) -> bool:
+    return bool(ads.get("enabled") and ads.get("personal") and (ads.get("text") or "").strip())
 
 
 async def send_member_preview(
@@ -66,31 +60,19 @@ async def send_member_preview(
 
     raw = (ads.get("text") or "").strip()
     if not raw:
-        await send_html(bot, viewer.id, "Текст рекламы пустой, пост в чат не отправляется.")
-    elif ads_separate(ads):
+        await send_html(bot, viewer.id, "Текст рекламы пустой, реклама не отправляется.")
+    elif ads_for_members(ads):
         await send_html(
             bot,
             viewer.id,
-            f"<i>Отдельный пост каждые {AD_EVERY_MESSAGES} сообщений. "
-            f"Предыдущий удаляется через {AD_KEEP_MESSAGES}.</i>\n\n"
+            f"<i>Каждому в чате до {ADS_PER_DAY} раз в день, когда он что-то делает в чате. "
+            "Видит только сам человек.</i>\n\n"
             + ad_message_text(raw),
             ad_keyboard(ads),
             preview=True,
         )
     else:
-        await send_html(bot, viewer.id, "Отдельный пост в чат сейчас выключен.")
-
-    if raw and ads.get("enabled") and ads.get("personal"):
-        await send_html(
-            bot,
-            viewer.id,
-            "<i>Лично автору сообщения, "
-            f"{cooldown_label(int(ads.get('personal_cooldown') or 0))}. "
-            "В чате это видит только он.</i>\n\n"
-            + ad_message_text(raw),
-            ad_keyboard(ads),
-            preview=True,
-        )
+        await send_html(bot, viewer.id, "Реклама каждому в чате сейчас выключена.")
 
     fail = FAIL_TEXT.get(fail_mode, FAIL_TEXT["kick"])
     await send_html(bot, viewer.id, "<i>Если кнопку не нажать</i>\n\n" + escape(fail))

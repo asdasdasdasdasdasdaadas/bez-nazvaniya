@@ -94,35 +94,3 @@ async def _old_database():
     finally:
         await db.close()
         os.remove(path)
-
-
-def test_chat_ad_is_removed_after_350_messages():
-    asyncio.run(_ad_lifetime())
-
-
-async def _ad_lifetime():
-    from bot.logic import AD_EVERY_MESSAGES, AD_KEEP_MESSAGES
-
-    handle, path = tempfile.mkstemp(suffix=".db")
-    os.close(handle)
-    db = Database(path)
-    await db.connect()
-    try:
-        await db.upsert_chat(-7, "Чат", "supergroup", 1)
-        for _ in range(AD_EVERY_MESSAGES - 1):
-            _count, stale = await db.bump_chat_messages(-7, drop_after=AD_KEEP_MESSAGES)
-            assert stale == []
-        count, stale = await db.bump_chat_messages(-7, drop_after=AD_KEEP_MESSAGES)
-        assert count == AD_EVERY_MESSAGES
-        assert stale == []
-        await db.remember_posted_ad(-7, 42, count)
-        for _ in range(AD_KEEP_MESSAGES - 1):
-            _count, stale = await db.bump_chat_messages(-7, drop_after=AD_KEEP_MESSAGES)
-            assert 42 not in stale
-        _count, stale = await db.bump_chat_messages(-7, drop_after=AD_KEEP_MESSAGES)
-        assert stale == [42]
-        _count, stale = await db.bump_chat_messages(-7, drop_after=AD_KEEP_MESSAGES)
-        assert stale == []
-    finally:
-        await db.close()
-        os.remove(path)
